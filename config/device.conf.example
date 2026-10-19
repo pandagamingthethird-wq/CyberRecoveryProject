@@ -1,0 +1,24 @@
+# CyberFlasher per-device configuration
+# Copy to device.conf and fill in for your target device.
+
+DEVICE_CODENAME=example_bf7
+BOARD_NAME=CY-BF7-H6127
+
+# Size presets the UI will offer the user when flashing a boot/recovery image.
+# Values in bytes. Add/remove presets freely.
+PARTITION_SIZE_PRESETS=33554432,67108864,134217728
+PARTITION_SIZE_LABELS=32MB,64MB,128MB
+
+# Paths used by flash/backup/mount engines (by-name symlinks or /dev/block/mapper/*)
+PATH_BOOT=/dev/block/bootdevice/by-name/boot
+PATH_RECOVERY=/dev/block/bootdevice/by-name/recovery
+PATH_SYSTEM=/dev/block/mapper/system
+PATH_VENDOR=/dev/block/mapper/vendor
+
+# Whether system/vendor/product are "logical" (dynamic partitions) and need
+# the device-mapper node created before mount (TWRP's "logical" fstab flag)
+USES_DYNAMIC_PARTITIONS=true
+
+# Ramdisk compression supported by this kernel (gzip is safest/most compatible;
+# only set lzma/lz4/xz if confirmed via /proc/config.gz CONFIG_RD_* support)
+RAMDISK_COMPRESSION=gzip

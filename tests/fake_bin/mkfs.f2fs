@@ -1,0 +1,3 @@
+#!/bin/bash
+echo "FAKE mkfs.f2fs called with: $*" >> "${CF_TEST_LOG:-/tmp/cf_engine_calls.log}"
+exit 0

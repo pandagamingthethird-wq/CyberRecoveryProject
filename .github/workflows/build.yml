@@ -1,0 +1,59 @@
+name: Build CyberFlasher
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential binutils gzip cpio python3 \
+            libarchive-dev openssl unzip zip
+
+      - name: Build (make)
+        run: make
+
+      - name: Run full C unit/integration suite (data_manager, theme_xml, fb_text,
+          ui_loop, input_backend, fstab_parser, twrp_digest, twrp_tar, wipe_engine,
+          openrecoveryscript, sideload_bridge, ors_execute incl. Phase 0 mount/wipe
+          consistency check, zip_installer, backup_restore round trip)
+        run: bash tests/run_tests.sh
+
+      - name: Run OTA zip signature verifier tests, Python version (including the malicious/wrong-signer case)
+        run: bash tests/test_ota_verify.sh
+
+      - name: Run OTA zip signature verifier tests, C port (same 6 scenarios)
+        run: bash tests/test_ota_verify_c.sh
+
+      - name: Run end-to-end install capstone test (ORS script -> verify -> extract -> exec)
+        run: bash tests/test_e2e_install.sh
+
+      - name: Run shrink-strategy dry run against a synthetic ramdisk
+        # No real BF7 ramdisk lives in this repo (it's device firmware data,
+        # shouldn't be committed). This builds a small fake tree with files
+        # matching the known patterns so the script's logic gets exercised
+        # on every push, not just manually on your machine.
+        run: |
+          mkdir -p ci_sample_ramdisk/lib64 ci_sample_ramdisk/bin
+          touch ci_sample_ramdisk/lib64/libclang_rt.ubsan_standalone-aarch64-android.so
+          touch ci_sample_ramdisk/lib64/libssh.so
+          touch ci_sample_ramdisk/bin/bash
+          touch ci_sample_ramdisk/bin/nano
+          head -c 50000 /dev/urandom > ci_sample_ramdisk/bin/some_real_binary
+          python3 scripts/dry_run_shrink.py ci_sample_ramdisk --target-mb 1
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyberflasher-build
+          path: cyberflasher
