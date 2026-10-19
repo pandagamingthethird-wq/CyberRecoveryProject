@@ -1,59 +1,157 @@
-name: Build CyberFlasher
+name: CyberRecoveryProject Builder (BF7)
+
+# TWRP-builder-style workflow — checks out TWO repos you choose at run
+# time: the device tree repo (boot.img, scripts, tools/magiskboot) and
+# CyberRecoveryProject's own source, cross compiles the `cyberflasher`
+# binary, injects it into the base boot.img's ramdisk as the UI process,
+# shrinks to fit the device's size budget, and repacks.
+#
+# SETUP NEEDED BEFORE THIS WORKS:
+#   1. Your device tree repo must contain: tools/magiskboot (Linux
+#      x86_64 build) OR a MAGISKBOOT_URL repo variable set on THIS repo
+#      (the one running the workflow); a base boot.img at the path given
+#      by `base_image`; scripts/inject_ui_binary.sh and
+#      scripts/shrink_ramdisk.py (same layout as before).
+#   2. scripts/inject_ui_binary.sh has a placeholder init.rc line — open
+#      it and confirm the exec path/args against your REAL unpacked
+#      ramdisk's init.rc before trusting this in CI.
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      device_tree_repo:
+        description: "Device tree repo, as owner/name (e.g. pandagamingthethird-wq/android_device_tecno_TECNO-BF7)"
+        required: true
+      device_tree_branch:
+        description: "Branch/tag/commit of the device tree repo to use"
+        required: false
+        default: "main"
+      base_image:
+        description: "Path (in the device tree repo) to the base boot.img to inject into"
+        required: true
+        default: "boot.img"
+      target_mb:
+        description: "Target partition size in MB"
+        required: false
+        default: "32"
+      cyberrecoveryproject_ref:
+        description: "Branch/tag/commit of CyberRecoveryProject to build"
+        required: false
+        default: "Newww"
+
+env:
+  CRP_REPO: pandagamingthethird-wq/CyberRecoveryProject
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repo
+      - name: Check out the device tree repo
         uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.device_tree_repo }}
+          ref: ${{ github.event.inputs.device_tree_branch || 'main' }}
+          path: device-repo
 
-      - name: Install toolchain
+      - name: Check out CyberRecoveryProject source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CRP_REPO }}
+          ref: ${{ github.event.inputs.cyberrecoveryproject_ref || 'Newww' }}
+          path: CyberRecoveryProject
+
+      - name: Install host toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential binutils gzip cpio python3 \
-            libarchive-dev openssl unzip zip
+          sudo apt-get install -y binutils gzip cpio build-essential
 
-      - name: Build (make)
-        run: make
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
 
-      - name: Run full C unit/integration suite (data_manager, theme_xml, fb_text,
-          ui_loop, input_backend, fstab_parser, twrp_digest, twrp_tar, wipe_engine,
-          openrecoveryscript, sideload_bridge, ors_execute incl. Phase 0 mount/wipe
-          consistency check, zip_installer, backup_restore round trip)
-        run: bash tests/run_tests.sh
-
-      - name: Run OTA zip signature verifier tests, Python version (including the malicious/wrong-signer case)
-        run: bash tests/test_ota_verify.sh
-
-      - name: Run OTA zip signature verifier tests, C port (same 6 scenarios)
-        run: bash tests/test_ota_verify_c.sh
-
-      - name: Run end-to-end install capstone test (ORS script -> verify -> extract -> exec)
-        run: bash tests/test_e2e_install.sh
-
-      - name: Run shrink-strategy dry run against a synthetic ramdisk
-        # No real BF7 ramdisk lives in this repo (it's device firmware data,
-        # shouldn't be committed). This builds a small fake tree with files
-        # matching the known patterns so the script's logic gets exercised
-        # on every push, not just manually on your machine.
+      - name: Cross-compile cyberflasher
         run: |
-          mkdir -p ci_sample_ramdisk/lib64 ci_sample_ramdisk/bin
-          touch ci_sample_ramdisk/lib64/libclang_rt.ubsan_standalone-aarch64-android.so
-          touch ci_sample_ramdisk/lib64/libssh.so
-          touch ci_sample_ramdisk/bin/bash
-          touch ci_sample_ramdisk/bin/nano
-          head -c 50000 /dev/urandom > ci_sample_ramdisk/bin/some_real_binary
-          python3 scripts/dry_run_shrink.py ci_sample_ramdisk --target-mb 1
+          cd CyberRecoveryProject
+          TOOLCHAIN="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$TOOLCHAIN/aarch64-linux-android29-clang" \
+            -Wall -O2 -static \
+            $(find src -name '*.c') \
+            -o cyberflasher-arm64
+          file cyberflasher-arm64
 
-      - name: Upload build output
+      - name: Set up magiskboot
+        run: |
+          cd device-repo
+          if [ -x "tools/magiskboot" ]; then
+            echo "Using committed tools/magiskboot (from device tree repo)"
+          elif [ -n "${{ vars.MAGISKBOOT_URL }}" ]; then
+            mkdir -p tools
+            curl -fsSL "${{ vars.MAGISKBOOT_URL }}" -o tools/magiskboot
+            chmod +x tools/magiskboot
+          else
+            echo "::error::No tools/magiskboot in the device tree repo and no MAGISKBOOT_URL set."
+            exit 1
+          fi
+          echo "$GITHUB_WORKSPACE/device-repo/tools" >> "$GITHUB_PATH"
+
+      - name: Verify magiskboot runs
+        run: magiskboot --help || { echo "::error::magiskboot binary won't run on this runner"; exit 1; }
+
+      - name: Check base image exists
+        run: |
+          IMG="device-repo/${{ github.event.inputs.base_image || 'boot.img' }}"
+          if [ ! -f "$IMG" ]; then
+            echo "::error::Base image not found at $IMG in the device tree repo — commit one or pass base_image manually."
+            exit 1
+          fi
+          echo "BASE_IMAGE=$IMG" >> "$GITHUB_ENV"
+
+      - name: Unpack base image
+        run: |
+          mkdir -p workdir
+          cd workdir
+          magiskboot unpack "$GITHUB_WORKSPACE/$BASE_IMAGE"
+          mkdir -p ramdisk
+          cd ramdisk && cpio -idm < ../ramdisk.cpio
+
+      - name: Inject cyberflasher binary into ramdisk
+        run: |
+          chmod +x device-repo/scripts/inject_ui_binary.sh
+          device-repo/scripts/inject_ui_binary.sh \
+            "$GITHUB_WORKSPACE/CyberRecoveryProject/cyberflasher-arm64" \
+            "$GITHUB_WORKSPACE/workdir/ramdisk"
+
+      - name: Shrink ramdisk to target size
+        run: |
+          python3 device-repo/scripts/shrink_ramdisk.py \
+            "$GITHUB_WORKSPACE/workdir/ramdisk" \
+            --target-mb "${{ github.event.inputs.target_mb || '32' }}" \
+            --apply --no-interactive
+
+      - name: Repack ramdisk and boot image
+        run: |
+          cd workdir
+          cd ramdisk && find . | cpio -o -H newc > ../ramdisk.cpio 2>/dev/null && cd ..
+          gzip -9 -f -c ramdisk.cpio > ramdisk.cpio.gz
+          magiskboot repack original "$GITHUB_WORKSPACE/boot-cyberrecovery.img"
+
+      - name: Check final size against budget
+        run: |
+          TARGET_MB="${{ github.event.inputs.target_mb || '32' }}"
+          TARGET_BYTES=$((TARGET_MB * 1024 * 1024))
+          SIZE=$(stat -c%s boot-cyberrecovery.img)
+          echo "Final image: $SIZE bytes (target: $TARGET_BYTES bytes)"
+          if [ "$SIZE" -gt "$TARGET_BYTES" ]; then
+            echo "::error::Image still over the ${TARGET_MB}MB budget after shrinking."
+            exit 2
+          fi
+
+      - name: Upload built image
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cyberflasher-build
-          path: cyberflasher
+          name: boot-cyberrecovery
+          path: boot-cyberrecovery.img
+          if-no-files-found: ignore
